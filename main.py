@@ -5,43 +5,43 @@ import time
 
 
 def main(page: ft.Page):
-    page.title = "Teste Simples"
+    page.title = "Teste"
     page.theme_mode = ft.ThemeMode.DARK
     page.padding = 15
     page.scroll = ft.ScrollMode.AUTO
 
-    logs = ft.Text(
-        value="Clique no botão para testar",
-        size=13,
-        color="#ccc",
+    resultado = ft.Text(
+        value="Aguardando clique...",
+        size=14,
+        color="white",
         selectable=True,
         font_family="monospace",
     )
 
-    container = ft.Container(
-        content=logs,
-        padding=10,
-        bgcolor="#0a0a0a",
-        border_radius=6,
-        border=ft.border.all(1, "#333"),
-        height=450,
-    )
+    contador = ft.Text(value="Cliques: 0", size=12, color="#888")
+
+    clique_count = [0]
 
     def testar(e):
-        logs.value = "INICIANDO TESTE...\n"
+        # Passo 1: atualizar imediatamente
+        clique_count[0] += 1
+        contador.value = f"Cliques: {clique_count[0]}"
+        resultado.value = f"Clique #{clique_count[0]} detectado! Rodando testes...\n"
         page.update()
 
+        # Passo 2: teste HTTP
         try:
             req = urllib.request.Request(
                 "https://api.github.com",
                 headers={"User-Agent": "Test/1.0"},
             )
             with urllib.request.urlopen(req, timeout=10) as resp:
-                logs.value += f"HTTP OK: {resp.status}\n"
+                resultado.value += f"[OK] HTTP: {resp.status}\n"
         except Exception as ex:
-            logs.value += f"HTTP ERRO: {type(ex).__name__}: {ex}\n"
+            resultado.value += f"[ERRO] HTTP: {type(ex).__name__}: {ex}\n"
         page.update()
 
+        # Passo 3: teste srv.us:22
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(8)
@@ -49,37 +49,39 @@ def main(page: ft.Page):
             s.connect(("srv.us", 22))
             dur = round(time.time() - inicio, 2)
             s.close()
-            logs.value += f"srv.us:22 OK ({dur}s)\n"
+            resultado.value += f"[OK] srv.us:22 ({dur}s)\n"
         except Exception as ex:
-            logs.value += f"srv.us:22 ERRO: {type(ex).__name__}: {ex}\n"
+            resultado.value += f"[ERRO] srv.us:22: {type(ex).__name__}\n"
         page.update()
 
+        # Passo 4: teste localhost.run:22
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(8)
             s.connect(("localhost.run", 22))
             s.close()
-            logs.value += "localhost.run:22 OK\n"
+            resultado.value += f"[OK] localhost.run:22\n"
         except Exception as ex:
-            logs.value += f"localhost.run:22 ERRO: {type(ex).__name__}: {ex}\n"
+            resultado.value += f"[ERRO] localhost.run:22: {type(ex).__name__}\n"
         page.update()
 
+        # Passo 5: teste porta 443 (HTTPS) para comparar
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(8)
-            s.connect(("serveo.net", 22))
+            s.connect(("srv.us", 443))
             s.close()
-            logs.value += "serveo.net:22 OK\n"
+            resultado.value += f"[OK] srv.us:443 (HTTPS)\n"
         except Exception as ex:
-            logs.value += f"serveo.net:22 ERRO: {type(ex).__name__}: {ex}\n"
+            resultado.value += f"[ERRO] srv.us:443: {type(ex).__name__}\n"
         page.update()
 
-        logs.value += "\nFIM DO TESTE\n"
+        resultado.value += "\n=== FIM ==="
         page.update()
 
     btn = ft.ElevatedButton(
-        text="TESTAR AGORA",
-        width=280,
+        text="TESTAR",
+        width=250,
         height=55,
         style=ft.ButtonStyle(bgcolor="#2196f3", color="white"),
         on_click=testar,
@@ -88,12 +90,20 @@ def main(page: ft.Page):
     page.add(
         ft.Column(
             controls=[
-                ft.Text("Teste de Rede", size=24, weight=ft.FontWeight.BOLD),
+                ft.Text("Teste de Rede", size=22, weight=ft.FontWeight.BOLD),
+                contador,
                 ft.Divider(),
                 ft.Row([btn], alignment=ft.MainAxisAlignment.CENTER),
                 ft.Divider(),
-                container,
-            ],
+                ft.Container(
+                    content=resultado,
+                    padding=10,
+                    bgcolor="#0a0a0a",
+                    border_radius=6,
+                    border=ft.border.all(1, "#333"),
+                    height=400,
+                ),
+            ]
         )
     )
 
