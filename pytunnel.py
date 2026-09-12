@@ -1,13 +1,10 @@
 """
-PyTunnel - Túnel reverso SSH para expor servidores locais à internet.
-Usa serviços gratuitos (srv.us, localhost.run) como relay.
+PyTunnel - Túnel reverso SSH. Versão DEBUG com logs detalhados.
 """
 import paramiko
 import select
 import socket
 import threading
-import hashlib
-import base64
 import os
 import time
 import logging
@@ -51,19 +48,22 @@ class PyTunnel:
                 pass
 
     def _load_or_generate_key(self):
-        """Carrega ou gera chave Ed25519 (muito mais rápida que RSA)."""
+        """Carrega ou gera chave Ed25519."""
+        self._log("📁 Pasta de dados: " + os.path.dirname(self.key_path))
+        self._log("📁 Caminho da chave: " + self.key_path)
+        self._log("📁 Existe? " + str(os.path.exists(self.key_path)))
+
         if os.path.exists(self.key_path):
-            self._log("🔑 Carregando chave Ed25519...")
+            self._log("🔑 Carregando chave existente...")
             try:
+                import io
                 with open(self.key_path, "r") as f:
                     key_data = f.read()
-                # Tenta carregar como Ed25519
-                import io
                 key = paramiko.Ed25519Key.from_private_key(io.StringIO(key_data))
                 self._log("✅ Chave carregada")
                 return key
             except Exception as e:
-                self._log(f"⚠️ Chave corrompida: {e}")
+                self._log(f"⚠️ Erro: {e}")
                 try:
                     os.remove(self.key_path)
                 except:
@@ -73,8 +73,12 @@ class PyTunnel:
         try:
             from cryptography.hazmat.primitives.asymmetric import ed25519
             from cryptography.hazmat.primitives import serialization
+            import io
 
+            self._log("    Gerando chave na memória...")
             private_key = ed25519.Ed25519PrivateKey.generate()
+
+            self._log("    Serializando...")
             private_bytes = private_key.private_bytes(
                 encoding=serialization.Encoding.PEM,
                 format=serialization.PrivateFormat.OpenSSH,
@@ -82,21 +86,22 @@ class PyTunnel:
             )
             key_str = private_bytes.decode("utf-8")
 
-            # Salva
+            self._log("    Salvando no disco...")
             pasta = os.path.dirname(self.key_path)
             if pasta and not os.path.exists(pasta):
                 os.makedirs(pasta, exist_ok=True)
             with open(self.key_path, "w") as f:
                 f.write(key_str)
+            self._log("✅ Chave salva")
 
-            self._log("✅ Chave gerada e salva")
-
-            import io
+            self._log("    Carregando de volta...")
             return paramiko.Ed25519Key.from_private_key(io.StringIO(key_str))
         except Exception as e:
-            self._log(f"❌ Erro ao gerar Ed25519: {e}")
-            # Fallback: tenta RSA se Ed25519 falhar
-            self._log("⚠️ Tentando fallback com RSA...")
+            import traceback
+            self._log(f"❌ Erro Ed25519: {type(e).__name__}: {e}")
+            for line in traceback.format_exc().splitlines():
+                self._log(line)
+            self._log("⚠️ Tentando fallback RSA...")
             key = paramiko.RSAKey.generate(2048)
             try:
                 key.write_private_key_file(self.key_path)
@@ -109,49 +114,36 @@ class PyTunnel:
         try:
             sock.connect((self.local_host, self.local_port))
         except Exception as e:
-            self._log(f"❌ Falha ao conectar em {self.local_host}:{self.local_port}")
-            try:
-                chan.close()
-            except:
-                pass
+            self._log(f"❌ Local falhou: {e}")
+            try: chan.close()
+            except: pass
             return
         try:
             while True:
                 r, _, _ = select.select([sock, chan], [], [], 30)
                 if chan in r:
                     data = chan.recv(4096)
-                    if not data:
-                        break
+                    if not data: break
                     sock.sendall(data)
                 if sock in r:
                     data = sock.recv(4096)
-                    if not data:
-                        break
+                    if not data: break
                     chan.sendall(data)
         except Exception:
             pass
         finally:
-            try:
-                chan.close()
-            except:
-                pass
-            try:
-                sock.close()
-            except:
-                pass
+            try: chan.close()
+            except: pass
+            try: sock.close()
+            except: pass
 
     def _loop_aceitar(self):
         while self.is_running and self.transport and self.transport.is_active():
             try:
                 chan = self.transport.accept(1)
-                if chan is None:
-                    continue
+                if chan is None: continue
                 self._channels.append(chan)
-                threading.Thread(
-                    target=self._handler_conexao,
-                    args=(chan,),
-                    daemon=True
-                ).start()
+                threading.Thread(target=self._handler_conexao, args=(chan,), daemon=True).start()
             except Exception:
                 break
 
@@ -160,15 +152,22 @@ class PyTunnel:
             return self.public_url
 
         try:
-            self._log("🔑 Preparando chave SSH...")
+            self._log("▶️ start() chamado")
+            self._log("🔑 Preparando chave...")
             key = self._load_or_generate_key()
             self._log("✅ Chave pronta")
 
-            self._log(f"🌐 Conectando em {self.ssh_server}:22...")
+            self._log(f"🌐 Importando paramiko...")
+            import paramiko as pk
+            self._log(f"✅ paramiko {pk.__version__}")
+
+            self._log(f"🌐 Criando SSHClient...")
             self.ssh_client = paramiko.SSHClient()
             self.ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            self._log(f"✅ SSHClient criado")
 
-            # Timeouts curtos para não travar
+            self._log(f"🌐 Conectando em {self.ssh_server}:22 (usuário: {self.ssh_user})...")
+            inicio = time.time()
             self.ssh_client.connect(
                 hostname=self.ssh_server,
                 port=22,
@@ -180,66 +179,59 @@ class PyTunnel:
                 banner_timeout=10,
                 auth_timeout=10,
             )
-            self._log("✅ SSH conectado!")
+            dur = round(time.time() - inicio, 2)
+            self._log(f"✅ SSH conectado em {dur}s!")
 
             self.transport = self.ssh_client.get_transport()
             self.transport.set_keepalive(30)
+            self._log("✅ Transport configurado")
 
             self._log(f"🔌 Solicitando porta remota {self.remote_port}...")
             self.transport.request_port_forward("", self.remote_port)
-            self._log("✅ Porta remota solicitada")
+            self._log("✅ Porta remota OK")
 
             self.is_running = True
             self._thread = threading.Thread(target=self._loop_aceitar, daemon=True)
             self._thread.start()
+            self._log("✅ Loop aceitar iniciado")
 
-            # Para localhost.run, a URL vem na notificação do serviço
-            # Mas usamos uma URL placeholder para mostrar algo
-            self.public_url = f"https://(verifique console)"
-            self._log(f"✅ Túnel ativo!")
+            self.public_url = "https://(verifique notificação do serviço)"
+            self._log(f"🎉 TÚNEL ATIVO!")
             return self.public_url
 
         except paramiko.AuthenticationException as e:
             self._log(f"❌ Auth falhou: {e}")
-            self.stop()
-            return None
+            self.stop(); return None
         except paramiko.SSHException as e:
             self._log(f"❌ SSH falhou: {e}")
-            self.stop()
-            return None
+            self.stop(); return None
         except socket.timeout:
             self._log(f"❌ Timeout ao conectar")
-            self.stop()
-            return None
+            self.stop(); return None
         except Exception as e:
+            import traceback
             self._log(f"❌ Erro: {type(e).__name__}: {e}")
-            self.stop()
-            return None
+            for line in traceback.format_exc().splitlines():
+                self._log(line)
+            self.stop(); return None
 
     def stop(self):
-        self._log("🛑 Parando túnel...")
+        self._log("🛑 Parando...")
         self.is_running = False
         for chan in self._channels:
-            try:
-                chan.close()
-            except:
-                pass
+            try: chan.close()
+            except: pass
         self._channels.clear()
         if self.transport:
-            try:
-                self.transport.close()
-            except:
-                pass
+            try: self.transport.close()
+            except: pass
             self.transport = None
         if self.ssh_client:
-            try:
-                self.ssh_client.close()
-            except:
-                pass
+            try: self.ssh_client.close()
+            except: pass
             self.ssh_client = None
         self._log("✅ Parado")
 
     def is_active(self):
-        return (self.is_running
-                and self.transport is not None
+        return (self.is_running and self.transport is not None
                 and self.transport.is_active())
