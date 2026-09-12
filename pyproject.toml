@@ -1,0 +1,38 @@
+[project]
+name = "pytunnel"
+version = "1.0.0"
+description = "Túnel reverso SSH para expor servidores locais à internet"
+requires-python = ">=3.9"
+dependencies = [
+    "flet==0.25.0",
+    "paramiko>=3.4.0",
+    "cryptography>=42.0.0",
+    "bcrypt>=4.0.0",
+    "pynacl>=1.5.0",
+]
+
+[tool.flet]
+org = "com.pytunnel"
+product = "PyTunnel"
+company = "PyTunnel"
+copyright = "Copyright (C) 2025"
+project_name = "PyTunnel"
+description = "Túnel reverso SSH para expor servidores locais à internet"
+version = "1.0.0"
+icon = "assets/icone.png"
+
+[tool.flet.app]
+module = "main"
+path = "."
+
+[tool.flet.splash]
+image = "assets/splash.png"
+
+[tool.flet.android.manifest_application]
+usesCleartextTraffic = "true"
+allowBackup = "true"
+
+[tool.flet.android.permission]
+"android.permission.INTERNET" = true
+"android.permission.ACCESS_NETWORK_STATE" = true
+"android.permission.ACCESS_WIFI_STATE" = true
