@@ -4,10 +4,9 @@ import paramiko
 import select
 import socket
 import threading
-import hashlib
-import base64
 import os
 import logging
+import re
 
 logging.basicConfig(
     level=logging.INFO,
@@ -17,8 +16,8 @@ logger = logging.getLogger("PyTunnel")
 
 class PyTunnel:
     """
-    Túnel reverso SSH via Pinggy (a.pinggy.io:443). Expõe um servidor local (host:porta)
-    para a internet de forma estável, ideal para Android.
+    Túnel reverso SSH via Pinggy (a.pinggy.io:443).
+    Expõe o servidor local (host:porta) para a internet com URL HTTPS pública do Pinggy.
     """
 
     def __init__(self, local_host="127.0.0.1", local_port=8550,
@@ -26,14 +25,9 @@ class PyTunnel:
                  key_path=None):
         self.local_host = local_host
         self.local_port = local_port
-        self.remote_port = remote_port # No Pinggy, 0 gera URL automática
+        self.remote_port = remote_port 
         self.ssh_server = ssh_server
-        self.ssh_user = ssh_user
-
-        if key_path is None:
-            pasta_dados = os.path.dirname(os.path.abspath(__file__))
-            key_path = os.path.join(pasta_dados, "tunnel_key")
-        self.key_path = key_path
+        self.ssh_user = ssh_user # 'http' para túnel web no Pinggy
 
         self.ssh_client = None
         self.transport = None
@@ -44,11 +38,9 @@ class PyTunnel:
         self.log_callback = None
 
     def set_log_callback(self, callback):
-        """Define uma função para receber os logs em tempo real na UI."""
         self.log_callback = callback
 
     def _log(self, mensagem):
-        """Envia o log para o terminal e para a interface gráfica."""
         logger.info(mensagem)
         if self.log_callback:
             try:
@@ -56,53 +48,13 @@ class PyTunnel:
             except:
                 pass
 
-    def _load_or_generate_key(self):
-        """Carrega a chave SSH RSA existente ou gera uma nova compatível."""
-        if os.path.exists(self.key_path):
-            self._log(f"Carregando chave SSH: {self.key_path}")
-            try:
-                return paramiko.RSAKey.from_private_key_file(self.key_path)
-            except Exception as e:
-                self._log(f"Chave corrompida, gerando nova: {e}")
-                try:
-                    os.remove(self.key_path)
-                except:
-                    pass
-
-        self._log("Gerando nova chave SSH RSA (pode levar alguns segundos)...")
-        key = paramiko.RSAKey.generate(2048)
-        try:
-            pasta = os.path.dirname(self.key_path)
-            if pasta and not os.path.exists(pasta):
-                os.makedirs(pasta, exist_ok=True)
-            key.write_private_key_file(self.key_path)
-            self._log(f"Chave salva em: {self.key_path}")
-        except Exception as e:
-            self._log(f"Não foi possível salvar a chave: {e}")
-        return key
-
-    def _calcular_url(self, key):
-        """Calcula a URL pública baseada no hash da chave."""
-        try:
-            pubkey_bytes = key.asbytes()
-        except Exception:
-            pubkey_bytes = key.get_base64().encode()
-
-        hasher = hashlib.sha256()
-        hasher.update(pubkey_bytes)
-        digest = hasher.digest()[:8]
-        subdomain = base64.b32encode(digest).decode().lower().rstrip('=')
-        url = f"https://{subdomain}.lhr.life"
-        self._log(f"URL calculada: {url}")
-        return url
-
     def _handler_conexao(self, chan):
-        """Encaminha dados entre o canal SSH e o servidor local."""
-        sock = socket.socket()
+        """Encaminha dados entre o canal SSH do Pinggy e o servidor local."""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             sock.connect((self.local_host, self.local_port))
         except Exception as e:
-            self._log(f"Falha ao conectar em {self.local_host}:{self.local_port}: {e}")
+            self._log(f"❌ Falha ao conectar no app local ({self.local_host}:{self.local_port}): {e}")
             try:
                 chan.close()
             except:
@@ -110,8 +62,10 @@ class PyTunnel:
             return
 
         try:
-            while True:
-                r, _, _ = select.select([sock, chan], [], [], 30)
+            while self.is_running:
+                r, _, _ = select.select([sock, chan], [], [], 1.0)
+                if not self.is_running:
+                    break
                 if chan in r:
                     data = chan.recv(4096)
                     if not data:
@@ -135,12 +89,15 @@ class PyTunnel:
                 pass
 
     def _loop_aceitar(self):
-        """Aceita conexões no túnel enquanto estiver ativo."""
+        """Escuta as conexões que o Pinggy redireciona da internet."""
+        self._log("🔄 Loop de escuta do túnel ativo.")
         while self.is_running and self.transport and self.transport.is_active():
             try:
                 chan = self.transport.accept(1)
                 if chan is None:
                     continue
+                
+                self._log("🌐 Requisição externa recebida do Pinggy! Redirecionando...")
                 self._channels.append(chan)
                 threading.Thread(
                     target=self._handler_conexao,
@@ -151,16 +108,18 @@ class PyTunnel:
                 if self.is_running:
                     pass
                 break
+        self._log("🛑 Loop de escuta encerrado.")
 
     def start(self):
-        """Inicia o túnel. Retorna a URL pública ou None se falhar."""
+        """Conecta no Pinggy e lê o link gerado abrindo um canal de shell interativo."""
         if self.is_running:
             self._log("Túnel já está ativo.")
             return self.public_url
 
         try:
-            key = self._load_or_generate_key()
-            self.public_url = self._calcular_url(key)
+            # Gera chave RSA limpa direto na memória
+            self._log("Gerando chave temporária para o Pinggy...")
+            key = paramiko.RSAKey.generate(2048)
 
             self.ssh_client = paramiko.SSHClient()
             self.ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -168,26 +127,81 @@ class PyTunnel:
             self._log(f"Conectando em {self.ssh_server}:443...")
             self.ssh_client.connect(
                 hostname=self.ssh_server,
-                port=443,  # Porta 443 para burlar firewalls de rede/Android
+                port=443,
                 username=self.ssh_user,
                 pkey=key,
                 look_for_keys=False,
                 allow_agent=False,
-                timeout=20,
-                banner_timeout=20,
+                timeout=25,
+                banner_timeout=25,
             )
 
             self.transport = self.ssh_client.get_transport()
             self.transport.set_keepalive(30)
 
-            self._log(f"Solicitando porta remota {self.remote_port}...")
+            # Solicita o encaminhamento de porta
+            self._log("Solicitando porta remota ao Pinggy...")
             self.transport.request_port_forward('', self.remote_port)
 
             self.is_running = True
             self._thread = threading.Thread(target=self._loop_aceitar, daemon=True)
             self._thread.start()
 
-            self._log(f"✅ Túnel ativo! URL: {self.public_url}")
+            # Abre um canal de Shell Interativo para capturar a URL do Pinggy
+            url_encontrada = None
+            try:
+                self._log("Abrindo shell para capturar a URL...")
+                shell = self.ssh_client.invoke_shell()
+                shell.settimeout(1.0)
+                
+                dados_iniciais = b""
+                import time
+                inicio_tentativa = time.time()
+                
+                # Aguarda até 8 segundos coletando a saída do shell
+                while time.time() - inicio_tentativa < 8.0:
+                    try:
+                        if shell.recv_ready():
+                            chunk = shell.recv(4096)
+                            if chunk:
+                                dados_iniciais += chunk
+                                texto_parcial = dados_iniciais.decode('utf-8', errors='ignore')
+                                
+                                # Limpa códigos ANSI de formatação do terminal antes de procurar
+                                texto_limpo_regex = re.sub(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', texto_parcial)
+                                
+                                # Regex estrita: para exatamente onde termina o domínio (.net ou .link), ignorando pipes e lixo
+                                matches = re.findall(r'(https://[a-zA-Z0-9.-]+(?:free\.pinggy\.net|pinggy-free\.link))', texto_limpo_regex)
+                                if matches:
+                                    for m in matches:
+                                        link_candidato = m.strip()
+                                        if "dashboard" not in link_candidato and len(link_candidato) > 15:
+                                            url_encontrada = link_candidato
+                                            break
+                                    if url_encontrada:
+                                        break
+                    except socket.timeout:
+                        pass
+                    time.sleep(0.3)
+                
+                texto_canal = dados_iniciais.decode('utf-8', errors='ignore')
+                if texto_canal.strip():
+                    texto_limpo = re.sub(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', texto_canal)
+                    self._log(f"Mensagem do servidor Pinggy:\n{texto_limpo.strip()}")
+                
+                try:
+                    shell.close()
+                except:
+                    pass
+
+            except Exception as ex:
+                self._log(f"Nota ao ler shell: {ex}")
+
+            if not url_encontrada:
+                url_encontrada = "https://<Verifique_a_mensagem_do_servidor_acima>"
+
+            self.public_url = url_encontrada
+            self._log(f"✅ Túnel ativo! URL Oficial do Pinggy: {self.public_url}")
             return self.public_url
 
         except Exception as e:
@@ -196,9 +210,7 @@ class PyTunnel:
             return None
 
     def stop(self):
-        """Para o túnel e fecha todos os recursos."""
         self.is_running = False
-
         for chan in self._channels:
             try:
                 chan.close()
@@ -223,7 +235,6 @@ class PyTunnel:
         self._log("Túnel parado.")
 
     def is_active(self):
-        """Verifica se o túnel está ativo."""
         return (self.is_running
                 and self.transport is not None
                 and self.transport.is_active())
@@ -244,7 +255,7 @@ def main(page: ft.Page):
 
     txt_host = ft.TextField(label="Host local", value="127.0.0.1", prefix_icon=ft.Icons.DNS)
     txt_port = ft.TextField(label="Porta local", value="8550", prefix_icon=ft.Icons.NUMBERS)
-    txt_url = ft.TextField(label="Link público", read_only=True, value="")
+    txt_url = ft.TextField(label="Link público oficial (Pinggy)", read_only=True, value="")
 
     logs_field = ft.TextField(
         value="",
@@ -287,7 +298,7 @@ def main(page: ft.Page):
 
         btn_iniciar.disabled = True
         btn_parar.disabled = False
-        txt_status.value = "⏳ Conectando..."
+        txt_status.value = "⏳ Conectando ao Pinggy..."
         txt_status.color = "#ff9800"
         txt_url.value = ""
         logs_field.value = ""
@@ -301,51 +312,31 @@ def main(page: ft.Page):
                 pass
 
         try:
-            log("=== INICIANDO ===")
-            log(f"Host: {txt_host.value}")
-            log(f"Porta: {txt_port.value}")
+            porta = int(txt_port.value)
+        except:
+            log("❌ Porta inválida")
+            txt_status.value = "❌ Porta inválida"
+            txt_status.color = "#ff5722"
+            btn_iniciar.disabled = False
+            page.update()
+            return
 
-            try:
-                porta = int(txt_port.value)
-            except:
-                log("❌ Porta inválida")
-                txt_status.value = "❌ Porta inválida"
-                txt_status.color = "#ff5722"
-                btn_iniciar.disabled = False
-                page.update()
-                return
+        tunnel = PyTunnel(
+            local_host=txt_host.value.strip(),
+            local_port=porta,
+            remote_port=0,
+        )
+        tunnel.set_log_callback(log)
 
-            log("🔧 Criando PyTunnel (Pinggy 443)...")
-            tunnel = PyTunnel(
-                local_host=txt_host.value.strip(),
-                local_port=porta,
-                remote_port=0,
-            )
+        url = tunnel.start()
 
-            log("🔑 Configurando callback...")
-            tunnel.set_log_callback(log)
-
-            log("🚀 Chamando start()...")
-            url = tunnel.start()
-
-            log(f"📥 start() retornou: {url}")
-
-            if url:
-                txt_url.value = url
-                txt_status.value = "✅ Ativo!"
-                txt_status.color = "#4caf50"
-                btn_parar.disabled = False
-            else:
-                txt_status.value = "❌ Falha"
-                txt_status.color = "#ff5722"
-                btn_iniciar.disabled = False
-                btn_parar.disabled = True
-
-        except Exception as ex:
-            log(f"❌ EXCEPTION: {type(ex).__name__}: {ex}")
-            for line in traceback.format_exc().splitlines():
-                log(line)
-            txt_status.value = "❌ Erro grave"
+        if url:
+            txt_url.value = url
+            txt_status.value = "✅ Ativo!"
+            txt_status.color = "#4caf50"
+            btn_parar.disabled = False
+        else:
+            txt_status.value = "❌ Falha"
             txt_status.color = "#ff5722"
             btn_iniciar.disabled = False
             btn_parar.disabled = True
